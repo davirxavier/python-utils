@@ -9,7 +9,6 @@ from pathlib import Path
 import tensorflow as tf
 
 from data import resize
-from data.tflite_util import quantize_model, evaluate_on_test_tflite
 from data.split_data import split_data
 
 
