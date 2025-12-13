@@ -1,0 +1,9 @@
+keras==2.11.0
+numpy==1.24.4
+tensorflow==2.11.0
+tensorflow-addons==0.23.0
+tensorflow-model-optimization==0.8.0
+protobuf==3.19.*
+scikit-learn==1.6.1
+edgeimpulse==1.0.18
+pillow==11.3.0
