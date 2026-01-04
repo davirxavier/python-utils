@@ -31,10 +31,7 @@ def split_data(root_dir: str, test_size: float = 0.2):
     """
     Scans the 'input' folder in the provided root directory, finds all image and VOC annotation files,
     and splits them into training and testing folders, ensuring an even class distribution.
-
-    Args:
-        root_dir (str): The root directory where the 'input' folder is located.
-        test_size (float): The fraction of data to use for testing (default is 0.2, or 20%).
+    Background-only images (no XML or empty XML) are also included.
     """
 
     input_dir = Path(root_dir) / "input"
@@ -42,68 +39,74 @@ def split_data(root_dir: str, test_size: float = 0.2):
         print(f"Error: 'input' folder not found in {root_dir}.")
         return
 
-    # Paths for training and testing directories
     train_dir = Path(root_dir) / "training"
     test_dir = Path(root_dir) / "testing"
 
-    # If the training or testing directories already exist, do nothing
     if train_dir.exists() and test_dir.exists():
         print("Training and Testing directories already exist. No changes made.")
         return
 
-    # Create training and testing directories if they do not exist
     train_dir.mkdir(parents=True, exist_ok=True)
     test_dir.mkdir(parents=True, exist_ok=True)
 
-    # Collect all image files and corresponding annotation files
     image_files = []
-    annotation_files = []
 
     for image_file in input_dir.rglob("*"):
         if image_file.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]:
-            # Find corresponding annotation file (assuming .xml files for VOC annotations)
-            annotation_file = image_file.with_suffix(".xml")
-            if annotation_file.exists():
-                image_files.append(image_file)
-                annotation_files.append(annotation_file)
+            image_files.append(image_file)
 
-    # Group files by the labels in the annotation XML files
     data_by_class = defaultdict(list)
+    background_items = []
 
-    for image_file, annotation_file in zip(image_files, annotation_files):
+    for image_file in image_files:
+        annotation_file = image_file.with_suffix(".xml")
+
+        if not annotation_file.exists():
+            background_items.append((image_file, None))
+            continue
+
         labels = parse_voc_xml(annotation_file)
+
+        if len(labels) == 0:
+            background_items.append((image_file, annotation_file))
+            continue
+
         for label in labels:
             data_by_class[label].append((image_file, annotation_file))
 
-    # Split data by class (to ensure even distribution)
     train_data = []
     test_data = []
 
     for label, items in data_by_class.items():
-        # Shuffle data for this class
         random.shuffle(items)
-
-        # Split data for this class
         split_index = int(len(items) * (1 - test_size))
         train_data.extend(items[:split_index])
         test_data.extend(items[split_index:])
 
-    # Shuffle the final datasets
+    # Split background images (not stratified)
+    random.shuffle(background_items)
+    split_index = int(len(background_items) * (1 - test_size))
+    train_data.extend(background_items[:split_index])
+    test_data.extend(background_items[split_index:])
+
     random.shuffle(train_data)
     random.shuffle(test_data)
 
-    # Copy files to the respective folders
     def copy_files(file_list, target_dir):
         for image_file, annotation_file in file_list:
-            # Copy image files
             shutil.copy(str(image_file), target_dir / image_file.name)
-            # Copy corresponding annotation files
-            shutil.copy(str(annotation_file), target_dir / annotation_file.name)
+            if annotation_file is not None:
+                shutil.copy(str(annotation_file), target_dir / annotation_file.name)
 
     copy_files(train_data, train_dir)
     copy_files(test_data, test_dir)
 
-    print(f"Data split completed. {len(train_data)} images for training, {len(test_data)} images for testing.")
+    print(
+        f"Data split completed. "
+        f"{len(train_data)} images for training, "
+        f"{len(test_data)} images for testing."
+    )
+
 
 # Example usage:
 # if __name__ == "__main__":

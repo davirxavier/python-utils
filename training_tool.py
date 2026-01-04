@@ -7,9 +7,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import tensorflow as tf
-
-from data import resize
-from data.split_data import split_data
+from util.data import resize
+from util.data.split_data import split_data
 
 
 # -------------------------------
@@ -79,7 +78,6 @@ def collect_data(root_dir):
                 if xml_path.exists():
                     ann = parse_voc_xml(xml_path)
                 else:
-                    print(f"Annotation missing for {img_path}, using empty boxes.")
                     ann = ([], [])
 
                 data_list.append({"img_path": str(img_path), "annotations": ann})
@@ -190,26 +188,57 @@ def has_errors(errors):
 
 
 def augment_sample(img, data, is_object_detection=False, is_grayscale=False):
-    img = tf.image.random_brightness(img, max_delta=0.2)
+    """
+    img: tf.Tensor, image
+    data: tf.Tensor of shape (num_boxes, 5) -> [xmin, ymin, xmax, ymax, label_id]
+    """
+
+    # ----- Color augmentations -----
+    img = tf.image.random_brightness(img, max_delta=0.3)
     img = tf.image.random_contrast(img, 0.9, 1.15)
 
     if not is_grayscale:
         img = tf.image.random_saturation(img, 0.9, 1.15)
 
-    if not is_object_detection:
+    if is_object_detection:
+        shape = tf.shape(img)
+        h, w = tf.cast(shape[0], tf.float32), tf.cast(shape[1], tf.float32)
 
-        # ----- Random horizontal flip -----
+        # ----- Horizontal flip -----
+        if tf.random.uniform(()) > 0.5:
+            img = tf.image.flip_left_right(img)
+            # Flip x coordinates for all valid boxes
+            mask = data[:, 4] != -1
+            flipped_xmin = w - data[:, 2]
+            flipped_xmax = w - data[:, 0]
+            data = tf.where(tf.expand_dims(mask, -1),
+                            tf.stack([flipped_xmin, data[:, 1], flipped_xmax, data[:, 3], data[:, 4]], axis=1),
+                            data)
+
+        # ----- Vertical flip -----
+        if tf.random.uniform(()) > 0.5:
+            img = tf.image.flip_up_down(img)
+            # Flip y coordinates for all valid boxes
+            mask = data[:, 4] != -1
+            flipped_ymin = h - data[:, 3]
+            flipped_ymax = h - data[:, 1]
+            data = tf.where(tf.expand_dims(mask, -1),
+                            tf.stack([data[:, 0], flipped_ymin, data[:, 2], flipped_ymax, data[:, 4]], axis=1),
+                            data)
+
+    else:
+        # ----- Horizontal flip -----
         if tf.random.uniform(()) > 0.5:
             img = tf.image.flip_left_right(img)
 
+        # ----- Vertical flip -----
+        if tf.random.uniform(()) > 0.5:
+            img = tf.image.flip_up_down(img)
+
         # ----- Random zoom -----
         if tf.random.uniform(()) > 0.5:
-            scale = tf.random.uniform([], 0.9, 1.2)
-
-            # dynamic shape safe extraction
-            shape = tf.shape(img)
-            h, w = shape[0], shape[1]
-
+            scale = tf.random.uniform([], 0.9, 1.1)
+            h, w = tf.shape(img)[0], tf.shape(img)[1]
             new_h = tf.cast(tf.cast(h, tf.float32) * scale, tf.int32)
             new_w = tf.cast(tf.cast(w, tf.float32) * scale, tf.int32)
 
@@ -234,7 +263,7 @@ def safe_decode_image(img_path, grayscale=False):
         raise Exception(f"Unexpected error for image {img_path}: {e}")
 
 
-def create_tf_dataset(data, input_shape, label_map, is_object_detection, augmentation=True):
+def create_tf_dataset(data, input_shape, label_map, is_object_detection, augmentation=True, max_bboxes_per_image=10):
     target_w, target_h, target_c = input_shape
     grayscale = target_c == 1
 
@@ -253,17 +282,16 @@ def create_tf_dataset(data, input_shape, label_map, is_object_detection, augment
         labels = [label_map[x] for x in label_names]
 
         if is_object_detection:
-            if len(bboxes) == 0:
-                bboxes_tf = tf.zeros((0, 4), dtype=tf.float32)
-            else:
-                bboxes_tf = tf.convert_to_tensor(bboxes, dtype=tf.float32)
+            bboxes_with_labels = [(x1, y1, x2, y2, label) for (x1, y1, x2, y2), label in zip(bboxes, labels)]
 
-            if len(labels) == 0:
-                labels_tf = tf.zeros((0,), dtype=tf.int32)
-            else:
-                labels_tf = tf.convert_to_tensor(labels, dtype=tf.int32)
+            pad_box = (0.0, 0.0, 0.0, 0.0, -1)
+            if len(bboxes_with_labels) < max_bboxes_per_image:
+                num_pad = max_bboxes_per_image - len(bboxes_with_labels)
+                bboxes_with_labels.extend([pad_box] * num_pad)
+            elif len(bboxes_with_labels) > max_bboxes_per_image:
+                bboxes_with_labels = bboxes_with_labels[:max_bboxes_per_image]
 
-            annotations_tf.append((bboxes_tf, labels_tf))
+            annotations_tf.append(tf.convert_to_tensor(bboxes_with_labels, dtype=tf.float32))
             continue
 
         class_index = labels[0]
@@ -285,54 +313,71 @@ def create_tf_dataset(data, input_shape, label_map, is_object_detection, augment
 
 
 def generate_label_map(train_ds, test_ds):
-    label_list = []
-    label_map = {}
-    label_counter = 0
+    all_labels = set()
 
     for dataset in [train_ds, test_ds]:
         for item in dataset:
             labels = item["annotations"][1]
-            for l in labels:
-                if l not in label_map:
-                    label_list.append(l)
-                    label_map[l] = label_counter
-                    label_counter += 1
+            all_labels.update(labels)
+
+    label_list = sorted(all_labels)  # deterministic order
+    label_map = {label: idx for idx, label in enumerate(label_list)}
 
     return label_map, label_list
 
 
 def summarize_dataset(dataset, name):
     """
-    Print a simple readable summary of a dataset that stores:
-      - image file paths in dataset.image_paths
-      - annotations in dataset.annotations (list of lists of bbox dicts)
+    Print a readable summary of a dataset that stores:
+      - data["img_path"]
+      - data["annotations"] = (bboxes, labels)
     """
+
     num_items = len(dataset)
     print("----- Dataset Summary -----")
     print(f"Name: {name}")
     print(f"Total samples: {num_items}")
 
-    # Count objects and classes
+    # Object & class stats
     num_objects = 0
     class_counts = {}
 
+    # Background stats
+    num_bg_images = 0
+    num_fg_images = 0
+
     for data in dataset:
-        cls_list = data["annotations"][1]
-        for cls in cls_list:
+        bboxes, labels = data["annotations"]
+
+        if len(labels) == 0:
+            num_bg_images += 1
+            continue
+
+        num_fg_images += 1
+
+        for cls in labels:
             num_objects += 1
             class_counts[cls] = class_counts.get(cls, 0) + 1
 
-    print(f"Total objects: {num_objects}")
+    print(f"\nImage breakdown:")
+    print(f"  Foreground images (≥1 object): {num_fg_images}")
+    print(f"  Background-only images:        {num_bg_images}")
 
-    print("Classes:")
-    for cls in sorted(class_counts.keys()):
-        print(f"  {cls}: {class_counts[cls]}")
+    print(f"\nTotal objects: {num_objects}")
 
-    # Show first example
-    # if num_items > 0:
-    #     print("\nExample entry:")
-    #     print(f"  image_path: {dataset[0]["img_path"]}")
-    #     print(f"  annotations ([bboxes], [labels]): {dataset[0]["annotations"]}")
+    if num_objects > 0:
+        print("\nClasses:")
+        for cls in sorted(class_counts.keys()):
+            print(f"  {cls}: {class_counts[cls]}")
+    else:
+        print("\nClasses: (none)")
+
+    # Optional sanity ratios
+    if num_items > 0:
+        print("\nRatios:")
+        print(f"  % background images: {100.0 * num_bg_images / num_items:.2f}%")
+        print(f"  Avg objects / fg img: "
+              f"{num_objects / max(num_fg_images, 1):.2f}")
 
     print("---------------------------")
 
@@ -341,3 +386,4 @@ def process_images(root_folder, target_size, resize_mode, test_split=0.2):
     resize.resize_images(os.path.join(root_folder, "input_resize"), os.path.join(root_folder, "input"), target_size,
                          resize_mode)
     split_data(root_folder, test_split)
+

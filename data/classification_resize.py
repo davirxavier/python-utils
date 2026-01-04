@@ -90,6 +90,7 @@ def sliding_window_pil(image, step=50, window_size=(200, 200), sofa_area=None, s
             crop_box = (x, y, x + win_w, y + win_h)
             crops.append({'box': crop_box, 'coords': (x, y)})
             row_kept += 1
+            break
     return crops
 
 # -----------------------------
@@ -122,6 +123,7 @@ def process_images_voc_dynamic_threshold(window_size=(384, 384), step=75, resize
             if not file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                 continue
 
+            print(file)
             input_path = os.path.join(root, file)
             pil_img = load_image_pil(input_path)
             if pil_img is None:
@@ -188,11 +190,11 @@ overlap_thresholds = {
 }
 
 process_images_voc_dynamic_threshold(
-    window_size=(384, 384),
-    step=75,
-    resize_to=(160, 160),
-    sofa_area=(576, 0, 320, 1024),
-    skip_per_row=0,
+    window_size=(512, 512),
+    step=100,
+    resize_to=(96, 96),
+    sofa_area=(512, 0, 288, 1024),
+    skip_per_row=5,
     overlap_thresholds=overlap_thresholds,
     default_overlap_threshold=0.08
 )
